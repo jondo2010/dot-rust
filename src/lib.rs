@@ -287,7 +287,7 @@
 
 use self::LabelText::*;
 
-use std::borrow::{Cow, ToOwned};
+use std::{borrow::{Cow, ToOwned}, collections::BTreeSet};
 use std::io;
 use std::io::prelude::*;
 
@@ -386,6 +386,7 @@ impl Style {
 // So in the end I decided to use the third approach described above.
 
 /// `Id` is a Graphviz `ID`.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct Id<'a> {
     name: Cow<'a, str>,
 }
@@ -448,9 +449,7 @@ impl<'a> Id<'a> {
 /// The graph instance is responsible for providing the DOT compatible
 /// identifiers for the nodes and (optionally) rendered labels for the nodes and
 /// edges, as well as an identifier for the graph itself.
-pub trait Labeller<'a> {
-    type Node;
-    type Edge;
+pub trait Labeller<'a>: GraphWalk<'a> {
 
     /// Must return a DOT compatible identifier naming the graph.
     fn graph_id(&'a self) -> Id<'a>;
@@ -518,6 +517,16 @@ pub trait Labeller<'a> {
     ///
     /// [1]: https://graphviz.gitlab.io/_pages/doc/info/colors.html
     fn edge_color(&'a self, _e: &Self::Edge) -> Option<LabelText<'a>> {
+        None
+    }
+
+    /// The optional cluster ID for `node`, which must be a DOT compatible identifier naming the graph.
+    fn cluster_id(&'a self, _node: &Self::Cluster) -> Option<Id<'a>> {
+        None
+    }
+
+    /// Maps the cluster `id` to a label that will be used in the rendered output.
+    fn cluster_label(&'a self, _n: &Self::Cluster) -> Option<LabelText<'a>> {
         None
     }
 
@@ -853,6 +862,7 @@ impl ArrowShape {
 
 pub type Nodes<'a, N> = Cow<'a, [N]>;
 pub type Edges<'a, E> = Cow<'a, [E]>;
+pub type Clusters<'a, C> = Cow<'a, [C]>;
 
 /// Graph kind determines if `digraph` or `graph` is used as keyword
 /// for the graph.
@@ -900,15 +910,22 @@ impl Kind {
 pub trait GraphWalk<'a> {
     type Node: Clone;
     type Edge: Clone;
+    type Cluster: Clone;
 
     /// Returns all the nodes in this graph.
     fn nodes(&'a self) -> Nodes<'a, Self::Node>;
     /// Returns all of the edges in this graph.
     fn edges(&'a self) -> Edges<'a, Self::Edge>;
+    /// Returns all the clusters in this graph.
+    fn clusters(&'a self) -> Clusters<'a, Self::Cluster>;
+    /// Returns the optional parent of `cluster`.
+    fn cluster_parent(&'a self, cluster: &Self::Cluster) -> Option<Self::Cluster>;
     /// The source node for `edge`.
     fn source(&'a self, edge: &Self::Edge) -> Self::Node;
     /// The target node for `edge`.
     fn target(&'a self, edge: &Self::Edge) -> Self::Node;
+    /// Returns the cluster for `node`.
+    fn cluster(&'a self, node: &Self::Node) -> Option<Self::Cluster>;
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -920,6 +937,7 @@ pub enum RenderOption {
     NoNodeStyles,
     NoNodeColors,
     NoArrows,
+    NoClusterLabels,
 }
 
 /// Returns vec holding all the default render options.
@@ -929,11 +947,12 @@ pub fn default_options() -> Vec<RenderOption> {
 
 /// Renders directed graph `g` into the writer `w` in DOT syntax.
 /// (Simple wrapper around `render_opts` that passes a default set of options.)
-pub fn render<'a, N, E, G, W>(g: &'a G, w: &mut W) -> io::Result<()>
+pub fn render<'a, N, E, C, G, W>(g: &'a G, w: &mut W) -> io::Result<()>
 where
     N: Clone + 'a,
     E: Clone + 'a,
-    G: Labeller<'a, Node = N, Edge = E> + GraphWalk<'a, Node = N, Edge = E>,
+    C: Clone + Eq + 'a,
+    G: Labeller<'a, Node = N, Edge = E> + GraphWalk<'a, Node = N, Edge = E, Cluster = C>,
     W: Write,
 {
     render_opts(g, w, &[])
@@ -941,11 +960,12 @@ where
 
 /// Renders directed graph `g` into the writer `w` in DOT syntax.
 /// (Main entry point for the library.)
-pub fn render_opts<'a, N, E, G, W>(g: &'a G, w: &mut W, options: &[RenderOption]) -> io::Result<()>
+pub fn render_opts<'a, N, E, C, G, W>(g: &'a G, w: &mut W, options: &[RenderOption]) -> io::Result<()>
 where
     N: Clone + 'a,
     E: Clone + 'a,
-    G: Labeller<'a, Node = N, Edge = E> + GraphWalk<'a, Node = N, Edge = E>,
+    C: Clone + Eq + 'a,
+    G: Labeller<'a, Node = N, Edge = E> + GraphWalk<'a, Node = N, Edge = E, Cluster = C>,
     W: Write,
 {
     fn writeln<W: Write>(w: &mut W, arg: &[&str]) -> io::Result<()> {
@@ -1070,6 +1090,49 @@ where
 
         text.push(";");
         writeln(w, &text)?;
+    }
+
+    let mut clusters: Vec<_> = g.clusters().into();
+    let mut current_parent = None;
+
+    while !clusters.is_empty() {
+        for i in 0..clusters.len() {
+            if g.cluster_parent(&clusters[i]) == current_parent {
+
+            }
+        }
+        //clusters.iter_mut().find(|cluster| g.cluster_parent(cluster))
+    }
+
+    let nodes = g.nodes();
+    /*
+    for (cluster_id, node) in nodes
+        .iter()
+        .filter_map(|node| g.cluster_id(node).and_then(|id| Some((id, node))))
+    {
+        clusters.entry(cluster_id).or_insert(Vec::new()).push(node);
+    }
+    */
+
+    for (cluster_id, nodes) in clusters.iter() {
+        writeln(
+            w,
+            &["subgraph cluster_", cluster_id.as_slice(), " {"],
+        )?;
+
+        for n in nodes.iter() {
+            indent(w)?;
+            writeln(w, &[g.node_id(n).as_slice(), ";"])?;
+        }
+
+        if !options.contains(&RenderOption::NoClusterLabels) {
+            if let Some(label) = g.cluster_label(nodes.first().unwrap()) {
+                let label = label.to_dot_string();
+                writeln(w, &["label=", &label])?;
+            }
+        }
+
+        writeln(w, &["}"])?;
     }
 
     writeln(w, &["}"])
